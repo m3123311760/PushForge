@@ -1,0 +1,8 @@
+Event: {{ request.json.event or 'unknown' }}
+Level: {{ request.json.level or 'info' }}
+Summary: {{ request.json.summary or 'no summary' }}
+{% if request.json.details %}
+
+Details:
+{{ request.json.details }}
+{% endif %}

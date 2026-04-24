@@ -1,0 +1,41 @@
+{
+  "name": "demo-alert",
+  "route": "/webhook/demo/alert",
+  "methods": ["POST"],
+  "match": {
+    "headers": {
+      "X-Webhook-Source": "demo"
+    },
+    "json": {
+      "event": "alert"
+    }
+  },
+  "publish": {
+    "topic": "{{ request.json.topic or 'pushforge-demo' }}",
+    "title": "title.j2",
+    "message": "message.j2",
+    "priority": "{{ request.json.priority or 3 }}",
+    "tags": [
+      "webhook",
+      "{{ request.json.level or 'info' }}"
+    ],
+    "click": "{{ request.json.link or '' }}"
+  },
+  "ntfy": {
+    "server": "{{ env.NTFY_BASE_URL or 'https://ntfy.sh' }}",
+    "headers": {
+      "Authorization": "{{ 'Bearer ' + env.NTFY_TOKEN if env.NTFY_TOKEN else '' }}"
+    },
+    "timeout": 10,
+    "dry_run": true
+  },
+  "response": {
+    "status_code": 200,
+    "body": {
+      "status": "accepted",
+      "rule": "{{ rule.name }}",
+      "route": "{{ rule.route }}",
+      "received_at": "{{ meta.received_at }}"
+    }
+  }
+}
