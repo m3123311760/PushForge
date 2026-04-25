@@ -360,6 +360,28 @@ class PushForgeAppTests(unittest.TestCase):
         self.assertTrue(breaker.allow_request())
         self.assertFalse(breaker.allow_request())
 
+    def test_half_open_publish_failure_reopens_circuit_for_unexpected_exception(self) -> None:
+        breaker = app_module.CircuitBreaker("test", failure_threshold=1, recovery_timeout=0)
+        breaker.on_failure()
+
+        def failing_opener(outbound, timeout):
+            raise TimeoutError("socket timed out")
+
+        with self.assertRaises(TimeoutError):
+            app_module.publish_to_ntfy(
+                {
+                    "server": "https://ntfy.example.com",
+                    "timeout": 1,
+                    "retry": {"max_attempts": 1, "backoff_seconds": 0},
+                },
+                {"topic": "alerts"},
+                opener=failing_opener,
+                sleep_func=lambda seconds: None,
+                circuit_breaker=breaker,
+            )
+
+        self.assertEqual(breaker.snapshot()["state"], "open")
+
     def test_invalid_match_operator_is_rejected_when_loading_rule(self) -> None:
         self._write_rule(
             "invalid-match",

@@ -893,8 +893,11 @@ def publish_to_ntfy(
     app_config = (context or {}).get("app_config") or AppConfig()
     retry_policy = RetryPolicy.from_config(ntfy_config, app_config)
 
-    if circuit_breaker and not circuit_breaker.allow_request():
-        raise NtfyPublishError("circuit breaker is open", None, retryable=True)
+    breaker_request_allowed = False
+    if circuit_breaker:
+        breaker_request_allowed = circuit_breaker.allow_request()
+        if not breaker_request_allowed:
+            raise NtfyPublishError("circuit breaker is open", None, retryable=True)
 
     server_url = normalize_server_url(ntfy_config.get("server"))
     timeout = float(ntfy_config.get("timeout", app_config.ntfy_timeout))
@@ -927,6 +930,10 @@ def publish_to_ntfy(
             )
         except error.URLError as exc:
             publish_error = NtfyPublishError(str(exc.reason), None, retryable=True)
+        except Exception:
+            if circuit_breaker and breaker_request_allowed:
+                circuit_breaker.on_failure()
+            raise
 
         if logger:
             logger.warning(
