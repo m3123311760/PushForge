@@ -155,8 +155,10 @@ class CircuitBreaker:
 
     def allow_request(self) -> bool:
         with self._lock:
-            if self._state.state != "open":
+            if self._state.state == "closed":
                 return True
+            if self._state.state == "half_open":
+                return False
             if self._state.opened_at is None:
                 return False
             if time.monotonic() - self._state.opened_at >= self._state.recovery_timeout:
@@ -172,11 +174,13 @@ class CircuitBreaker:
 
     def on_failure(self) -> None:
         with self._lock:
-            self._state.failure_count += 1
-            if self._state.failure_count >= self._state.failure_threshold:
+            if self._state.state == "half_open":
+                self._state.failure_count = self._state.failure_threshold
                 self._state.state = "open"
                 self._state.opened_at = time.monotonic()
-            elif self._state.state == "half_open":
+                return
+            self._state.failure_count += 1
+            if self._state.failure_count >= self._state.failure_threshold:
                 self._state.state = "open"
                 self._state.opened_at = time.monotonic()
 
@@ -217,6 +221,7 @@ class RuleRegistry:
         self._fingerprint: tuple[tuple[str, int], ...] = ()
         self.last_loaded_at: str | None = None
         self._circuit_breakers: dict[str, CircuitBreaker] = {}
+        self._circuit_breakers_lock = Lock()
 
     def all_rules(self) -> list[RuleDefinition]:
         return sorted(self.rules.values(), key=lambda item: item.route)
@@ -226,15 +231,16 @@ class RuleRegistry:
         return self.rules.get(route)
 
     def get_circuit_breaker(self, route: str) -> CircuitBreaker:
-        breaker = self._circuit_breakers.get(route)
-        if breaker is None:
-            breaker = CircuitBreaker(
-                route,
-                failure_threshold=self.app_config.circuit_breaker_failure_threshold,
-                recovery_timeout=self.app_config.circuit_breaker_recovery_timeout,
-            )
-            self._circuit_breakers[route] = breaker
-        return breaker
+        with self._circuit_breakers_lock:
+            breaker = self._circuit_breakers.get(route)
+            if breaker is None:
+                breaker = CircuitBreaker(
+                    route,
+                    failure_threshold=self.app_config.circuit_breaker_failure_threshold,
+                    recovery_timeout=self.app_config.circuit_breaker_recovery_timeout,
+                )
+                self._circuit_breakers[route] = breaker
+            return breaker
 
     def breaker_states(self) -> list[dict[str, Any]]:
         return [self.get_circuit_breaker(rule.route).snapshot() for rule in self.all_rules()]
@@ -294,6 +300,7 @@ class RuleRegistry:
         if "ntfy" not in config:
             raise ValueError("ntfy section is required")
         validate_security_config(config.get("security"))
+        validate_match_config(config.get("match", {}))
 
         retry_config = config.get("ntfy", {}).get("retry")
         if retry_config not in (None, False) and not isinstance(retry_config, dict):
@@ -456,6 +463,33 @@ def require_security_fields(security_spec: dict[str, Any], fields: list[str], se
     for field_name in fields:
         if not str(security_spec.get(field_name, "")).strip():
             raise ValueError(f"{security_type} security requires '{field_name}'")
+
+
+def validate_match_config(match_spec: Any) -> None:
+    if match_spec in (None, {}):
+        return
+    if not isinstance(match_spec, dict):
+        raise ValueError("match must be a JSON object")
+
+    supported_sections = {"headers", "query", "json", "form"}
+    supported_operators = {"equals", "in", "contains", "exists", "not_equals"}
+    for section_name, expected_values in match_spec.items():
+        if section_name not in supported_sections:
+            raise ValueError(f"unsupported match section '{section_name}'")
+        if not isinstance(expected_values, dict):
+            raise ValueError(f"match section '{section_name}' must be a JSON object")
+
+        for dotted_key, expected_value in expected_values.items():
+            if not isinstance(dotted_key, str) or not dotted_key:
+                raise ValueError(f"match section '{section_name}' contains an invalid key")
+            if not isinstance(expected_value, dict):
+                continue
+
+            unknown = set(expected_value) - supported_operators
+            if unknown:
+                raise ValueError(f"unsupported match operators: {sorted(unknown)}")
+            if "in" in expected_value and not isinstance(expected_value["in"], list):
+                raise ValueError("'in' operator requires a list")
 
 
 def register_static_rule_routes(app: Flask, registry: RuleRegistry) -> None:
@@ -870,10 +904,7 @@ def publish_to_ntfy(
             headers[str(key)] = str(value)
 
     body = json.dumps(payload).encode("utf-8")
-    attempt = 0
-
-    while attempt < retry_policy.max_attempts:
-        attempt += 1
+    for attempt in range(1, retry_policy.max_attempts + 1):
         outbound = urllib_request.Request(server_url, data=body, headers=headers, method="POST")
 
         try:
@@ -923,10 +954,6 @@ def publish_to_ntfy(
         )
         if backoff_seconds > 0:
             sleep_func(backoff_seconds)
-
-    if circuit_breaker:
-        circuit_breaker.on_failure()
-    raise NtfyPublishError("ntfy publish failed after retries", None, retryable=True)
 
 
 def normalize_server_url(server: Any) -> str:

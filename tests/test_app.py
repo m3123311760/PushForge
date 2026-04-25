@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -316,6 +317,106 @@ class PushForgeAppTests(unittest.TestCase):
             )
 
         self.assertIn("circuit breaker is open", str(ctx.exception))
+
+    def test_rule_registry_returns_one_circuit_breaker_under_concurrency(self) -> None:
+        registry = app_module.RuleRegistry(
+            self.rules_dir,
+            app_module.AppConfig(
+                rules_dir=self.rules_dir,
+                circuit_breaker_failure_threshold=2,
+                circuit_breaker_recovery_timeout=60,
+            ),
+        )
+        original_circuit_breaker = app_module.CircuitBreaker
+        start = threading.Barrier(16)
+        returned_breakers = []
+
+        class SlowCircuitBreaker(original_circuit_breaker):
+            def __init__(self, *args, **kwargs) -> None:
+                time.sleep(0.02)
+                super().__init__(*args, **kwargs)
+
+        def get_breaker() -> None:
+            start.wait()
+            returned_breakers.append(registry.get_circuit_breaker("/webhook/test"))
+
+        app_module.CircuitBreaker = SlowCircuitBreaker
+        try:
+            threads = [threading.Thread(target=get_breaker) for _ in range(16)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        finally:
+            app_module.CircuitBreaker = original_circuit_breaker
+
+        self.assertEqual({id(breaker) for breaker in returned_breakers}, {id(registry.get_circuit_breaker("/webhook/test"))})
+
+    def test_circuit_breaker_allows_only_one_half_open_probe(self) -> None:
+        breaker = app_module.CircuitBreaker("test", failure_threshold=1, recovery_timeout=0)
+
+        breaker.on_failure()
+
+        self.assertTrue(breaker.allow_request())
+        self.assertFalse(breaker.allow_request())
+
+    def test_invalid_match_operator_is_rejected_when_loading_rule(self) -> None:
+        self._write_rule(
+            "invalid-match",
+            {
+                "name": "invalid-match",
+                "route": "/webhook/invalid-match",
+                "methods": ["POST"],
+                "match": {
+                    "json": {
+                        "summary": {"regex": "failed"},
+                    },
+                },
+                "publish": {
+                    "topic": "invalid",
+                    "message": "invalid",
+                },
+                "ntfy": {
+                    "server": "https://ntfy.example.com",
+                    "dry_run": True,
+                },
+            },
+        )
+
+        response = self.client.post("/webhook/invalid-match", json={"summary": "failed"})
+
+        self.assertEqual(response.status_code, 404)
+        registry = self.flask_app.config["RULE_REGISTRY"]
+        self.assertTrue(any("unsupported match operators" in item["error"] for item in registry.errors))
+
+    def test_invalid_in_match_operator_value_is_rejected_when_loading_rule(self) -> None:
+        self._write_rule(
+            "invalid-in-match",
+            {
+                "name": "invalid-in-match",
+                "route": "/webhook/invalid-in-match",
+                "methods": ["POST"],
+                "match": {
+                    "json": {
+                        "level": {"in": "critical"},
+                    },
+                },
+                "publish": {
+                    "topic": "invalid",
+                    "message": "invalid",
+                },
+                "ntfy": {
+                    "server": "https://ntfy.example.com",
+                    "dry_run": True,
+                },
+            },
+        )
+
+        response = self.client.post("/webhook/invalid-in-match", json={"level": "critical"})
+
+        self.assertEqual(response.status_code, 404)
+        registry = self.flask_app.config["RULE_REGISTRY"]
+        self.assertTrue(any("'in' operator requires a list" in item["error"] for item in registry.errors))
 
     def test_error_audit_handler_persists_structured_record(self) -> None:
         error_log_path = self.rules_dir / "errors.jsonl"
