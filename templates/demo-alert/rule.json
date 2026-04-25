@@ -2,12 +2,23 @@
   "name": "demo-alert",
   "route": "/webhook/demo/alert",
   "methods": ["POST"],
+  "security": {
+    "type": "token",
+    "header": "X-Webhook-Token",
+    "value_env": "PUSHFORGE_DEMO_TOKEN"
+  },
   "match": {
     "headers": {
-      "X-Webhook-Source": "demo"
+      "X-Webhook-Source": {
+        "equals": "demo"
+      }
     },
     "json": {
-      "event": "alert"
+      "event": "alert",
+      "level": {
+        "in": ["info", "warning", "critical"],
+        "exists": true
+      }
     }
   },
   "publish": {
@@ -35,7 +46,9 @@
       "status": "accepted",
       "rule": "{{ rule.name }}",
       "route": "{{ rule.route }}",
-      "received_at": "{{ meta.received_at }}"
+      "received_at": "{{ meta.received_at }}",
+      "rendered_publish": "{{ publish_payload }}",
+      "ntfy": "{{ ntfy_result }}"
     }
   }
 }
