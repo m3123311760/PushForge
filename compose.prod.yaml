@@ -1,0 +1,16 @@
+services:
+  app:
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./templates:/app/templates:ro
+      - pushforge-logs:/app/logs
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          memory: 128M

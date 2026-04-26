@@ -1,0 +1,5 @@
+services:
+  app:
+    volumes:
+      - ./templates:/app/templates:ro
+      - ./logs:/app/logs
