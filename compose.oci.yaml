@@ -1,0 +1,41 @@
+name: pushforge
+
+services:
+  app:
+    image: ${PUSHFORGE_IMAGE:-reg.mkrcc.com/library/pushforge:latest}
+    environment:
+      PUSHFORGE_LOG_DIR: /app/logs
+      PUSHFORGE_LOG_LEVEL: ${PUSHFORGE_LOG_LEVEL:-INFO}
+      PUSHFORGE_DEMO_TOKEN: ${PUSHFORGE_DEMO_TOKEN:-change-me}
+      PUSHFORGE_NTFY_TIMEOUT: ${PUSHFORGE_NTFY_TIMEOUT:-10}
+      PUSHFORGE_NTFY_RETRY_ATTEMPTS: ${PUSHFORGE_NTFY_RETRY_ATTEMPTS:-3}
+      PUSHFORGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD: ${PUSHFORGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD:-5}
+      PUSHFORGE_CIRCUIT_BREAKER_RECOVERY_TIMEOUT: ${PUSHFORGE_CIRCUIT_BREAKER_RECOVERY_TIMEOUT:-30}
+      NTFY_BASE_URL: ${NTFY_BASE_URL:-https://ntfy.sh}
+      NTFY_TOKEN: ${NTFY_TOKEN:-}
+    ports:
+      - target: 5000
+        published: "${PUSHFORGE_PORT:-5000}"
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: ${PUSHFORGE_TEMPLATES_DIR:-./templates}
+        target: /app/templates
+        read_only: true
+      - pushforge-logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=3).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  pushforge-logs:

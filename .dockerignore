@@ -1,0 +1,12 @@
+.git
+.idea
+.venv
+.tmp-tests
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+logs
+tests
+dist

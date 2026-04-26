@@ -179,6 +179,144 @@ Linux 生产运行可使用 Gunicorn：
 gunicorn -c gunicorn.conf.py wsgi:application
 ```
 
+## Docker 部署
+
+项目提供了模块化 Compose 文件：
+
+- `compose.yaml`：基础服务定义、端口、环境变量和命名日志卷
+- `compose.override.yaml`：本地开发覆盖文件，挂载 `templates/` 和 `logs/`
+- `compose.prod.yaml`：生产覆盖文件，增加重启策略、只读根文件系统和资源限制
+
+首次运行先准备环境变量：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+然后编辑 `.env`，至少把 `PUSHFORGE_DEMO_TOKEN` 改成强随机值。如果要真实推送到 ntfy，还需要按规则配置设置 `NTFY_BASE_URL`、`NTFY_TOKEN`，并把规则中的 `dry_run` 改为 `false`。
+
+本地 Docker 运行：
+
+```powershell
+docker compose up --build
+```
+
+生产 Docker 运行：
+
+```bash
+docker compose -f compose.yaml -f compose.prod.yaml up -d --build
+```
+
+常用运维命令：
+
+```bash
+docker compose ps
+docker compose logs -f app
+docker compose exec app python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:5000/healthz').read().decode())"
+docker compose down
+```
+
+注意：默认镜像不会复制 `tests/`，生产容器内不适合跑测试；测试请在源码环境或临时测试镜像里执行。生产部署建议在前面挂 Nginx/Caddy/Traefik 负责 HTTPS 和域名转发。
+
+## Makefile 发布
+
+仓库提供了 `Makefile`，用于统一测试、校验 Compose、构建镜像、推送镜像和发布 OCI Artifact。
+
+常用命令：
+
+```bash
+make test
+make compose-config
+make image-build
+make image-push
+make image-push-multi
+make artifact-pack
+make artifact-push
+make compose-publish
+make compose-publish-with-env
+make release
+make release-multi
+```
+
+默认镜像地址是 `reg.mkrcc.com/library/pushforge`，默认版本号来自 `git describe --tags --always --dirty`。发布前可以覆盖变量：
+
+```bash
+make release \
+  IMAGE_REGISTRY=reg.mkrcc.com \
+  IMAGE_NAMESPACE=library \
+  IMAGE_NAME=pushforge \
+  VERSION=v1.0.0
+```
+
+镜像发布会推送：
+
+- `$(IMAGE_REGISTRY)/$(IMAGE_NAMESPACE)/$(IMAGE_NAME):$(VERSION)`
+- `$(IMAGE_REGISTRY)/$(IMAGE_NAMESPACE)/$(IMAGE_NAME):latest`
+
+源码包 OCI Artifact 发布依赖 `oras`，会先生成 `dist/pushforge-$(VERSION).tar.gz`，再推送到：
+
+```text
+$(IMAGE_REGISTRY)/$(IMAGE_NAMESPACE)/$(IMAGE_NAME)-artifact:$(VERSION)
+```
+
+这个 `*-artifact` 是源码/部署包，不是 Compose Project，不能用 `docker compose -f oci://... up` 启动。
+
+可直接被 Docker Compose 启动的 OCI Artifact 由 `docker compose publish` 发布：
+
+```text
+$(IMAGE_REGISTRY)/$(IMAGE_NAMESPACE)/$(IMAGE_NAME)-compose:$(VERSION)
+```
+
+默认 `compose-publish` 只会把镜像地址固定进 Compose Artifact，不会把本地 `.env` 里的 token、secret 一起发布。服务器启动时用服务器自己的环境变量覆盖：
+
+```bash
+mkdir -p ./templates
+PUSHFORGE_DEMO_TOKEN=your-token \
+NTFY_BASE_URL=https://ntfy.sh \
+PUSHFORGE_TEMPLATES_DIR=./templates \
+docker compose -f oci://reg.mkrcc.com/pushforge/pushforge-compose:v1.0.0 up -d
+```
+
+OCI Compose 默认把服务器当前目录的 `./templates` 挂载到容器 `/app/templates`，用于维护 webhook 规则。如果不设置 `PUSHFORGE_TEMPLATES_DIR`，请确保启动命令所在目录已经有 `templates/`。
+
+如果你确认 `.env` 里没有敏感信息，或者你就是要发布一份绑定环境的 Compose Artifact，可以显式执行：
+
+```bash
+make compose-publish-with-env IMAGE_NAMESPACE=pushforge VERSION=v1.0.0
+```
+
+发布后服务器可以这样启动：
+
+```bash
+docker compose -f oci://reg.mkrcc.com/library/pushforge-compose:v1.0.0 up -d
+```
+
+如果你的仓库项目名不是 `library`，把路径里的 `library` 换成实际项目名。
+
+如果 Compose Artifact 中的镜像地址需要临时覆盖，可以在服务器端指定 `PUSHFORGE_IMAGE`：
+
+```bash
+PUSHFORGE_IMAGE=reg.mkrcc.com/pushforge/pushforge:v1.0.0 \
+PUSHFORGE_TEMPLATES_DIR=./templates \
+  docker compose -f oci://reg.mkrcc.com/pushforge/pushforge-compose:v1.0.0 up -d
+```
+
+发布前需要先登录目标仓库，例如：
+
+```bash
+docker login reg.mkrcc.com
+oras login reg.mkrcc.com
+```
+
+默认 `make release` 只构建并推送当前 Docker 环境对应的架构，适合普通 Docker Desktop 或默认 `docker` buildx driver。多架构发布需要先创建 `docker-container` builder：
+
+```bash
+make builder-create
+make release-multi VERSION=v1.0.0
+```
+
+如果你看到 `Multi-platform build is not supported for the docker driver`，说明当前 builder 不支持多架构，请使用上面的 `builder-create` 后再运行 `release-multi`。
+
 也可以通过环境变量调整开发入口：
 
 - `PUSHFORGE_HOST`：开发入口监听地址，默认 `0.0.0.0`
